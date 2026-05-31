@@ -40,7 +40,7 @@ def model_selection_page():
 
     if ml_type == "Classification":
 
-        model_name = st.selectbox("Choose Algorith",
+        model_name = st.selectbox("Choose Algorithm",
                                   ["Logistic Regression","Random Forest","SVM","k-Nearest Neighbors","Naive Bayes","Neural Networks", "Decision Tree"])
         target = st.selectbox("Select Target Column" , df.columns)
         X = df.drop(columns=[target])
