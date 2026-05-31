@@ -1,22 +1,26 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from scipy.stats import zscore
 from scipy.stats.mstats import winsorize
 from sklearn.decomposition import PCA
+from sklearn.feature_selection import RFE
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.preprocessing import PowerTransformer, PolynomialFeatures
 from imblearn.over_sampling import SMOTE
 from imblearn.under_sampling import RandomUnderSampler
 
 def preprocessing_page():
-    if st.session_state["data"] is None:
+    if st.session_state.get("data") is None:
         st.warning("Upload a file first.")
+        return
     else:
         df = st.session_state["data"].copy()
+        
     st.title("Preprocessing Page")
 
     # =========================
@@ -112,47 +116,9 @@ def preprocessing_page():
                 st.success(f"Outliers handled using {outlier_method}")
                 st.write(f"Shape: {df.shape}")
 
-        # =========================
-        # Feature Engineering & Selection
-        # =========================
         st.divider()
-        st.header("3. Feature Engineering & Selection")
 
-        # Balancing
-        st.subheader("A. Handling Imbalanced Data")
-        target_for_balance = st.selectbox("Select Target for Balancing (Classification only):", [None] + list(df.columns))
-
-        if target_for_balance:
-            balance_method = st.radio("Select Balancing Method:", ["None", "Oversampling (SMOTE)", "Undersampling"])
-            if balance_method != "None":
-                X_temp = df.drop(columns=[target_for_balance])
-                y_temp = df[target_for_balance]
-                X_temp_dummy = pd.get_dummies(X_temp, drop_first=True)
-
-                if balance_method == "Oversampling (SMOTE)":
-                    smote = SMOTE(random_state=42)
-                    X_res, y_res = smote.fit_resample(X_temp_dummy, y_temp)
-                else:
-                    rus = RandomUnderSampler(random_state=42)
-                    X_res, y_res = rus.fit_resample(X_temp_dummy, y_temp)
-
-                df = pd.concat([X_res, y_res], axis=1)
-                st.success(f"Data balanced using {balance_method}. New shape: {df.shape}")
-
-        # PCA
-        st.subheader("B. Dimensionality Reduction (PCA)")
-        if st.checkbox("Apply PCA"):
-            n_components = st.slider("Select number of components:", 1, min(df.shape[1], 10), 2)
-            pca = PCA(n_components=n_components)
-            num_cols_pca = df.select_dtypes(include=np.number).columns.tolist()
-            if num_cols_pca:
-                pca_results = pca.fit_transform(df[num_cols_pca])
-                pca_df = pd.DataFrame(pca_results, columns=[f'PC{i+1}' for i in range(n_components)])
-                df = pd.concat([pca_df, df.select_dtypes(exclude=np.number).reset_index(drop=True)], axis=1)
-                st.write(f"Explained variance ratio: {pca.explained_variance_ratio_.sum():.2f}")
-                st.success("PCA Applied successfully.")
-
-                # =========================
+        # =========================
         # 3. Feature Transformation
         # =========================
         st.subheader("3. Feature Transformation")
@@ -196,21 +162,72 @@ def preprocessing_page():
                         df = df.drop(columns=transform_cols)
                         df = pd.concat([df, df_poly], axis=1)
                         st.success(f" Generated {len(poly_cols)} Polynomial features")
-
-                    st.dataframe(df.head())
                 
                 except Exception as e:
                     st.error(f" Transformation Error: {e}")
                     st.info("Tip: If you have zeros or negative numbers, use 'Yeo-Johnson' or 'Log' instead of Box-Cox.")
 
         # =========================
-        # 4. Handling Imbalanced Data
+        # 4. Feature Selection & Dimensionality Reduction
         # =========================
-        st.subheader("4. Handling Imbalanced Data")
+        st.subheader("4. Feature Selection & Dimensionality Reduction")
+        
+        # A. PCA
+        if st.checkbox("Apply PCA (Dimensionality Reduction)"):
+            n_components = st.slider("Select number of components:", 1, min(df.shape[1], 10), 2)
+            pca = PCA(n_components=n_components)
+            num_cols_pca = df.select_dtypes(include=np.number).columns.tolist()
+            if num_cols_pca:
+                pca_results = pca.fit_transform(df[num_cols_pca])
+                pca_df = pd.DataFrame(pca_results, columns=[f'PC{i+1}' for i in range(n_components)])
+                
+                pca_df.index = df.index
+                df_non_numeric = df.select_dtypes(exclude=np.number)
+                df = pd.concat([pca_df, df_non_numeric], axis=1)
+                
+                st.write(f"Explained variance ratio: {pca.explained_variance_ratio_.sum():.2f}")
+                st.success("PCA Applied successfully.")
+
+        # B. RFE
+        if st.checkbox("Apply RFE (Recursive Feature Elimination)"):
+            target_rfe = st.selectbox("Select Target Column for RFE:", options=[None] + list(df.columns), key="rfe_target")
+            if target_rfe:
+                X_rfe = df.drop(columns=[target_rfe]).select_dtypes(include=[np.number])
+                y_rfe = df[target_rfe]
+                
+                if X_rfe.shape[1] > 0:
+                    num_features_to_select = st.slider("Number of features to select:", 1, max(1, X_rfe.shape[1]), max(1, X_rfe.shape[1]//2))
+                    
+                    # Automate estimator based on target type
+                    if y_rfe.dtype == object or len(y_rfe.unique()) < 15:
+                        estimator = RandomForestClassifier(random_state=42)
+                    else:
+                        estimator = RandomForestRegressor(random_state=42)
+                        
+                    if st.button("Run RFE"):
+                        try:
+                            with st.spinner("Running RFE... Please wait."):
+                                rfe = RFE(estimator=estimator, n_features_to_select=num_features_to_select)
+                                rfe.fit(X_rfe, y_rfe)
+                                selected_cols = X_rfe.columns[rfe.support_].tolist()
+                            
+                            df_non_numeric_rfe = df.drop(columns=[target_rfe]).select_dtypes(exclude=[np.number])
+                            df = pd.concat([df[selected_cols], df_non_numeric_rfe, df[[target_rfe]]], axis=1)
+                            st.success(f"RFE complete! Selected features: {', '.join(selected_cols)}")
+                        except Exception as e:
+                            st.error(f"RFE Error: {e}")
+                else:
+                    st.error("No numeric features available to apply RFE.")
+
+        # =========================
+        # 5. Handling Imbalanced Data
+        # =========================
+        st.subheader("5. Handling Imbalanced Data")
 
         target_for_resampling = st.selectbox(
             "Select Target Column for Resampling:", 
             options=[None] + list(df.columns),
+            key="resample_target",
             help="Resampling will balance the classes in this column."
         )
 
@@ -252,9 +269,9 @@ def preprocessing_page():
                     st.error(f"Resampling Error: {e}")
 
         # =========================
-        # 5. Encoding & Scaling
+        # 6. Encoding & Normalization
         # =========================
-        st.subheader("5. Encoding & Normalization")
+        st.subheader("6. Encoding & Normalization")
 
         target_col = st.selectbox(
             "Select Target Column",
@@ -266,33 +283,49 @@ def preprocessing_page():
         num_cols = df[feature_cols].select_dtypes(include=np.number).columns.tolist()
         cat_cols = df[feature_cols].select_dtypes(exclude=np.number).columns.tolist()
 
+        # Normalization selection
+        scaling_method = st.selectbox("Select Normalization Method:", ["None", "Standard Scaler", "MinMax Scaler"])
         exclude_scale = st.multiselect("Columns to EXCLUDE from Scaling", options=num_cols)
-        exclude_encode = st.multiselect("Columns to EXCLUDE from Encoding", options=cat_cols)
+        
+        # Encoding choices
+        one_hot_cols = st.multiselect("Columns for One-Hot Encoding", options=cat_cols)
+        label_encode_cols = st.multiselect("Columns for Label Encoding", options=[c for c in cat_cols if c not in one_hot_cols])
 
         if st.button("Apply Transformation"):
             cols_to_scale = [c for c in num_cols if c not in exclude_scale]
-            cols_to_encode = [c for c in cat_cols if c not in exclude_encode]
 
-            df_final = pd.DataFrame()
+            df_final = pd.DataFrame(index=df.index)
 
-            # Scaling
-            if cols_to_scale:
-                scaler = StandardScaler()
+            # Normalization (Scaling)
+            if cols_to_scale and scaling_method != "None":
+                if scaling_method == "Standard Scaler":
+                    scaler = StandardScaler()
+                elif scaling_method == "MinMax Scaler":
+                    scaler = MinMaxScaler()
+                    
                 df_scaled = pd.DataFrame(
                     scaler.fit_transform(df[cols_to_scale]),
                     columns=cols_to_scale,
                     index=df.index
                 )
                 df_final = pd.concat([df_final, df_scaled], axis=1)
+            elif cols_to_scale:
+                df_final = pd.concat([df_final, df[cols_to_scale]], axis=1)
 
-            # Encoding
-            if cols_to_encode:
-                df_encoded = pd.get_dummies(df[cols_to_encode], drop_first=True)
+            # One-Hot Encoding
+            if one_hot_cols:
+                df_encoded = pd.get_dummies(df[one_hot_cols], drop_first=True, dtype=int)
                 df_encoded.index = df.index
                 df_final = pd.concat([df_final, df_encoded], axis=1)
 
-            # Remaining
-            remaining = [c for c in feature_cols if c not in cols_to_scale + cols_to_encode]
+            # Label Encoding
+            if label_encode_cols:
+                for c in label_encode_cols:
+                    le = LabelEncoder()
+                    df_final[c] = le.fit_transform(df[c].astype(str))
+
+            # Remaining features
+            remaining = [c for c in feature_cols if c not in cols_to_scale + one_hot_cols + label_encode_cols]
             if remaining:
                 df_final = pd.concat([df_final, df[remaining]], axis=1)
 
@@ -303,7 +336,5 @@ def preprocessing_page():
             st.success("Processing Complete")
             st.dataframe(df_final.head())
 
-    else:
-        st.warning("Upload a file first.")
-
-preprocessing_page()
+if __name__ == "__main__":
+    preprocessing_page()
